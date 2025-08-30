@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Head from "next/head";
 import Script from "next/script";
-import * as XLSX from "xlsx";
 
 export default function Home(){
   const [status, setStatus] = useState("Hazır");
@@ -21,7 +20,7 @@ export default function Home(){
     if (typeof window === "undefined") return;
     setClientReady(true);
     if (!url || !key) {
-      setStatus("Supabase ayarları eksik: Vercel → Çevre Değişkenleri");
+      setStatus("Supabase ayarları eksik: Vercel → Project → Environment Variables");
       return;
     }
     (async()=>{
@@ -42,11 +41,14 @@ export default function Home(){
     setStatus("Hazır");
   }
 
-  // Excel yükle
+  // ---- EXCEL YÜKLE (xlsx'yi tarayıcıda dinamik import ediyoruz)
   async function handleExcel(fileList){
     if(!supabaseRef.current){ alert("Supabase ayarları eksik"); return; }
     if(!fileList || fileList.length===0){ alert("Excel seçin"); return; }
     setStatus("Excel okunuyor...");
+
+    const XLSX = await import("xlsx"); // ⬅️ DİNAMİK IMPORT
+
     const upserts = [];
     for(const f of fileList){
       const buf = await f.arrayBuffer();
@@ -54,7 +56,7 @@ export default function Home(){
       const ws = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(ws, { defval:"" });
       for(const raw of rows){
-        const barcode = normalize(raw["BARKOD_NO"] || raw["BARKOD"] || raw["BARCODE"] || "");
+        const barcode = normalize(raw["BARKOD_NO"] || raw["BARKOD"] || raw["BARCODE"] || raw["MUS_BARKOD_NO"] || "");
         if(!barcode) continue;
         upserts.push({
           barcode,
@@ -69,7 +71,7 @@ export default function Home(){
     await refreshData();
   }
 
-  // Eksikleri hesapla (normalize'lı karşılaştırma)
+  // ---- EKSİK HESAPLA
   const missingList = useMemo(()=>{
     const recSet = new Set(received.map(r=> normalize(r.barcode)));
     return (expected || [])
@@ -81,15 +83,16 @@ export default function Home(){
       .sort((a,b)=> (b.days_pending||0) - (a.days_pending||0));
   }, [expected, received]);
 
-  // Sayaçlar
+  // ---- SAYAÇLAR
   const stats = useMemo(()=>({
     expected: expected.length,
     received: received.length,
     missing: missingList.length
   }), [expected, received, missingList]);
 
-  // Excel dışa aktar
-  function exportMissing(){
+  // ---- EXCEL DIŞA AKTAR (xlsx'yi burada da dinamik import ediyoruz)
+  async function exportMissing(){
+    const XLSX = await import("xlsx");
     const rows = missingList.map(m => {
       const rec = received.find(r => normalize(r.barcode) === normalize(m.barcode));
       return {
@@ -106,21 +109,19 @@ export default function Home(){
     XLSX.utils.book_append_sheet(wb, ws, "EksikIadeler");
     XLSX.writeFile(wb, `Eksik_Iadeler_${new Date().toISOString().slice(0,10)}.xlsx`);
   }
-  function exportReceived(){
+  async function exportReceived(){
+    const XLSX = await import("xlsx");
     const rows = (received || [])
       .slice()
       .sort((a,b)=> new Date(b.added_at||0) - new Date(a.added_at||0))
-      .map(r => ({
-        BARKOD_NO: r.barcode,
-        OKUNDUGU_TARIH: humanDate(r.added_at)
-      }));
+      .map(r => ({ BARKOD_NO: r.barcode, OKUNDUGU_TARIH: humanDate(r.added_at) }));
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "GelenIadeler");
     XLSX.writeFile(wb, `Gelen_Iadeler_${new Date().toISOString().slice(0,10)}.xlsx`);
   }
 
-  // Satır sil
+  // ---- SATIR SİL / HEPSİNİ TEMİZLE
   async function deleteExpected(barcode){
     await supabaseRef.current.from("expected").delete().eq("barcode", barcode);
     await refreshData();
@@ -129,8 +130,6 @@ export default function Home(){
     await supabaseRef.current.from("received").delete().eq("barcode", barcode);
     await refreshData();
   }
-
-  // Hepsini temizle
   async function clearAll(){
     if(!confirm("Beklenen ve Gelen tablolardaki TÜM kayıtlar silinecek. Emin misin?")) return;
     await supabaseRef.current.from("expected").delete().neq("barcode", "");
@@ -138,11 +137,12 @@ export default function Home(){
     await refreshData();
   }
 
-  // Kamera
+  // ---- KAMERA / TARAYICI
   async function startScan(){
     if(!clientReady) return;
     if(typeof window === "undefined" || !window.Quagga) return;
     if(scanning) return;
+    setStatus("Kamera açılıyor...");
     window.Quagga.init({
       inputStream: { type:"LiveStream", target: scannerRef.current, constraints:{ facingMode:"environment" } },
       decoder: { readers:["code_128_reader","ean_reader","ean_8_reader","upc_reader","upc_e_reader"] },
