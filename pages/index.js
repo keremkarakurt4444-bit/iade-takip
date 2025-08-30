@@ -5,19 +5,18 @@ import * as XLSX from "xlsx";
 
 export default function Home(){
   const [status, setStatus] = useState("Hazır");
-  const [expected, setExpected] = useState([]);   // beklenen iadeler
-  const [received, setReceived] = useState([]);   // gelen iadeler
-  const [lastCode, setLastCode] = useState("");   // son okunan ham barkod
+  const [expected, setExpected] = useState([]);
+  const [received, setReceived] = useState([]);
+  const [lastCode, setLastCode] = useState("");
   const [clientReady, setClientReady] = useState(false);
 
   const supabaseRef = useRef(null);
-  const scannerRef = useRef(null); // Quagga önizlemeyi bu DIV içine koyar
+  const scannerRef = useRef(null);
   const [scanning, setScanning] = useState(false);
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  // Tarayıcıda Supabase'i başlat + sayfa kapanırken kamerayı durdur
   useEffect(()=>{
     if (typeof window === "undefined") return;
     setClientReady(true);
@@ -43,7 +42,6 @@ export default function Home(){
     setStatus("Hazır");
   }
 
-  // Excel yükle → expected'e upsert
   async function handleExcel(fileList){
     if(!supabaseRef.current){ alert("Supabase ayarları eksik"); return; }
     if(!fileList || fileList.length===0){ alert("Excel seçin"); return; }
@@ -60,7 +58,7 @@ export default function Home(){
         const rawBarcode =
           norm["BARCODE"] ?? norm["BARKOD_NO"] ?? norm["BARKOD"] ?? norm["MUS_BARKOD_NO"] ?? norm["MUSTERI_BARKOD"] ?? "";
         const barcode = normalize(rawBarcode);
-        if(!barcode) continue; // barkodsuz satırları at
+        if(!barcode) continue;
         const isim = (norm["ISIM"] ?? norm["ALICI_ISIM"] ?? norm["ALICI"] ?? norm["MUSTERI_ADI"] ?? "").toString().trim();
         const telefon = (norm["TELEFON"] ?? norm["ALICI_TELEFON"] ?? norm["GSM"] ?? "").toString().trim();
         upserts.push({ barcode, isim, telefon, added_at: new Date().toISOString() });
@@ -73,7 +71,6 @@ export default function Home(){
     await refreshData();
   }
 
-  // Eksikleri hesapla + kaç gündür gelmedi
   function computeMissing(){
     const recSet = new Set(received.map(r=> normalize(r.barcode)));
     const missing = expected.filter(e => !recSet.has(normalize(e.barcode)));
@@ -83,22 +80,24 @@ export default function Home(){
     }).sort((a,b)=> (b.days_pending||0) - (a.days_pending||0));
   }
 
-  // Eksikleri Excel'e aktar
   function exportMissing(){
-    const rows = computeMissing().map(m => ({
-      BARKOD_NO: m.barcode,
-      ALICI_ISIM: m.isim || "",
-      ALICI_TELEFON: m.telefon || "",
-      KAC_GUNDUR_GELMEDI: m.days_pending,
-      ILK_YUKLEME_TARIHI: humanDate(m.added_at),
-    }));
+    const rows = computeMissing().map(m => {
+      const rec = received.find(r => normalize(r.barcode) === normalize(m.barcode));
+      return {
+        BARKOD_NO: m.barcode,
+        ALICI_ISIM: m.isim || "",
+        ALICI_TELEFON: m.telefon || "",
+        KAC_GUNDUR_GELMEDI: m.days_pending,
+        ILK_YUKLEME_TARIHI: humanDate(m.added_at),
+        OKUNDUGU_TARIH: humanDate(rec?.added_at)
+      };
+    });
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "EksikIadeler");
     XLSX.writeFile(wb, `Eksik_Iadeler_${new Date().toISOString().slice(0,10)}.xlsx`);
   }
 
-  // Bip sesi
   function playBeep() {
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -111,7 +110,6 @@ export default function Home(){
     } catch {}
   }
 
-  // Arka kamerayı olabildiğince garantiye al (iOS/Safari için)
   async function getBackCameraConstraints(){
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
@@ -122,7 +120,6 @@ export default function Home(){
     return { facingMode: { exact: "environment" } };
   }
 
-  // Kamera başlat
   async function startScan(){
     if(!clientReady){ alert("Tarayıcı hazır değil"); return; }
     if(typeof window === "undefined" || !window.Quagga){ alert("Tarama kütüphanesi yüklenmedi"); return; }
@@ -130,7 +127,7 @@ export default function Home(){
 
     setStatus("Kamera açılıyor...");
     const camConstraints = await getBackCameraConstraints();
-    const targetEl = scannerRef.current; // Quagga hedef DIV
+    const targetEl = scannerRef.current;
     if(!targetEl){ setStatus("Önizleme alanı bulunamadı"); return; }
 
     window.Quagga.init({
@@ -165,14 +162,12 @@ export default function Home(){
     });
   }
 
-  // Kamera durdur
   function stopScan(){
     try { window.Quagga.stop(); } catch {}
     setScanning(false);
     setStatus("Durduruldu");
   }
 
-  // Okunan barkodu received'e yaz + tabloyu yenile
   async function onScan(raw){
     if(!supabaseRef.current){ return; }
     const code = normalize(raw);
@@ -191,25 +186,13 @@ export default function Home(){
     return { expected: expected.length, received: received.length, missing: list.length, list };
   }, [expected, received]);
 
-  // Beklenen'de son okunan var mı? (teşhis için)
-  const lastInExpected = useMemo(()=>{
-    const n = normalize(lastCode);
-    if(!n) return false;
-    return expected.some(e => normalize(e.barcode) === n);
-  }, [lastCode, expected]);
-
   return (
     <>
       <Head><title>İade Takip</title></Head>
       <Script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js" strategy="afterInteractive" />
       <div style={{maxWidth:1100, margin:"0 auto", padding:16, fontFamily:"system-ui"}}>
         <h1>📦 İade Takip</h1>
-        <p style={{color:"#64748b"}}>Excel yükle → beklenenleri ekle. Telefonda kameradan okut → gelenler eklenir. Eksikleri indir.</p>
         <p><b>Durum:</b> {status}</p>
-        <p>
-          <b>Son okunan (normalize):</b> {normalize(lastCode) || "-"}{" "}
-          <b>Beklenen’de var mı?</b> {lastInExpected ? "EVET" : "HAYIR"}
-        </p>
 
         <div style={{display:"flex", gap:12, flexWrap:"wrap", marginBottom:12}}>
           <input type="file" accept=".xls,.xlsx" multiple onChange={(e)=>handleExcel(e.target.files)} />
@@ -225,30 +208,7 @@ export default function Home(){
               <button onClick={stopScan} disabled={!scanning}>Durdur</button>
               <span>Son: <code>{lastCode}</code></span>
             </div>
-
-            {/* ÖNİZLEME: Quagga video/canvas'ı bu DIV içine ekler */}
-            <div
-              ref={scannerRef}
-              style={{
-                width:"100%",
-                height: 320,
-                background:"#000",
-                borderRadius:8,
-                position:"relative",
-                overflow:"hidden"
-              }}
-            />
-
-            <div style={{marginTop:8}}>
-              <input
-                placeholder="Manuel barkod"
-                onKeyDown={(e)=>{ if(e.key==='Enter'){ onScan(e.currentTarget.value); e.currentTarget.value=''; }}}
-              />
-              <button onClick={()=>{
-                const el = document.querySelector("input[placeholder='Manuel barkod']");
-                if(el && el.value){ onScan(el.value); el.value=''; }
-              }}>Ekle</button>
-            </div>
+            <div ref={scannerRef} style={{width:"100%", height:320, background:"#000", borderRadius:8}} />
           </div>
 
           <div style={{border:"1px solid #e5e7eb", borderRadius:12, padding:12}}>
@@ -265,29 +225,30 @@ export default function Home(){
             <table style={{width:"100%", borderCollapse:"collapse"}}>
               <thead>
                 <tr>
-                  <th style={{borderBottom:"1px solid #e5e7eb", textAlign:"left", padding:8}}>BARKOD_NO</th>
-                  <th style={{borderBottom:"1px solid #e5e7eb", textAlign:"left", padding:8}}>ALICI_ISIM</th>
-                  <th style={{borderBottom:"1px solid #e5e7eb", textAlign:"left", padding:8}}>ALICI_TELEFON</th>
-                  <th style={{borderBottom:"1px solid #e5e7eb", textAlign:"right", padding:8}}>Kaç Gündür Gelmedi</th>
-                  <th style={{borderBottom:"1px solid #e5e7eb", textAlign:"right", padding:8}}>İlk Yükleme</th>
-                  <th style={{borderBottom:"1px solid #e5e7eb", textAlign:"left", padding:8}}>İşlem</th>
+                  <th>BARKOD_NO</th>
+                  <th>ALICI_ISIM</th>
+                  <th>ALICI_TELEFON</th>
+                  <th>Kaç Gündür Gelmedi</th>
+                  <th>İlk Yükleme</th>
+                  <th>Okunduğu Tarih</th>
                 </tr>
               </thead>
               <tbody>
-                {stats.list.map((m)=>(
-                  <tr key={m.barcode}>
-                    <td style={{borderBottom:"1px solid #f1f5f9", padding:8}}><code>{m.barcode}</code></td>
-                    <td style={{borderBottom:"1px solid #f1f5f9", padding:8}}>{m.isim}</td>
-                    <td style={{borderBottom:"1px solid #f1f5f9", padding:8}}><code>{m.telefon}</code></td>
-                    <td style={{borderBottom:"1px solid #f1f5f9", padding:8, textAlign:"right"}}>{m.days_pending}</td>
-                    <td style={{borderBottom:"1px solid #f1f5f9", padding:8, textAlign:"right"}}>{humanDate(m.added_at)}</td>
-                    <td style={{borderBottom:"1px solid #f1f5f9", padding:8}}>
-                      <button onClick={()=> onScan(m.barcode)}>Geldi</button>
-                    </td>
-                  </tr>
-                ))}
+                {stats.list.map((m)=> {
+                  const rec = received.find(r => normalize(r.barcode) === normalize(m.barcode));
+                  return (
+                    <tr key={m.barcode}>
+                      <td><code>{m.barcode}</code></td>
+                      <td>{m.isim}</td>
+                      <td><code>{m.telefon}</code></td>
+                      <td>{m.days_pending}</td>
+                      <td>{humanDate(m.added_at)}</td>
+                      <td>{humanDate(rec?.added_at)}</td>
+                    </tr>
+                  );
+                })}
                 {stats.list.length===0 && (
-                  <tr><td colSpan={6} style={{padding:12, color:"#64748b"}}>Eksik iade yok 🎉</td></tr>
+                  <tr><td colSpan={6}>Eksik iade yok 🎉</td></tr>
                 )}
               </tbody>
             </table>
@@ -298,7 +259,6 @@ export default function Home(){
   );
 }
 
-// Barkodları agresif normalize et: sadece rakam bırak + baştaki sıfırları at
 function normalize(s){
   if(!s) return "";
   const digitsOnly = String(s).normalize("NFKC").replace(/\s+/g,"").replace(/\D+/g,"");
