@@ -1,5 +1,7 @@
 import dynamic from "next/dynamic";
 import { useEffect, useMemo, useRef, useState } from "react";
+import Head from "next/head";
+import Script from "next/script";
 
 function PageInner(){
   const [status, setStatus] = useState("Hazır");
@@ -14,7 +16,6 @@ function PageInner(){
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  // Supabase'ı sadece tarayıcıda başlat
   useEffect(()=>{
     (async ()=>{
       if(!url || !key){
@@ -30,8 +31,7 @@ function PageInner(){
         setStatus("Supabase başlatılamadı");
       }
     })();
-
-    return ()=>{ try{ if(window?.Quagga){ window.Quagga.stop(); } }catch{} };
+    return ()=>{ try{ window?.Quagga?.stop(); }catch{} };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -45,7 +45,7 @@ function PageInner(){
     setStatus("Hazır");
   }
 
-  // --- Excel yükle (xlsx sadece tarayıcıda, .default ile)
+  // --- Excel içe aktar (dinamik xlsx)
   async function handleExcel(fileList){
     if(!supabaseRef.current){ alert("Supabase ayarları eksik"); return; }
     if(!fileList || fileList.length===0){ alert("Excel seçin"); return; }
@@ -101,7 +101,7 @@ function PageInner(){
     missing: missingList.length
   }), [expected, received, missingList]);
 
-  // --- Excel dışa aktar (xlsx .default ile)
+  // --- Excel dışa aktar (dinamik xlsx)
   async function exportMissing(){
     const XLSX = (await import("xlsx")).default;
     const rows = missingList.map(m => {
@@ -132,7 +132,7 @@ function PageInner(){
     XLSX.writeFile(wb, `Gelen_Iadeler_${new Date().toISOString().slice(0,10)}.xlsx`);
   }
 
-  // --- Silme / Hepsini temizle
+  // --- Satır sil / Hepsini temizle
   async function deleteExpected(barcode){
     await supabaseRef.current.from("expected").delete().eq("barcode", barcode);
     await refreshData();
@@ -196,108 +196,111 @@ function PageInner(){
   }
 
   return (
-    <div style={{padding:16,fontFamily:"system-ui",maxWidth:1100,margin:"0 auto"}}>
-      <h1>📦 İade Takip</h1>
-      <p><b>Durum:</b> {status}</p>
+    <>
+      <Head><title>İade Takip</title></Head>
+      <Script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js" strategy="afterInteractive" />
+      <div style={{padding:16,fontFamily:"system-ui",maxWidth:1100,margin:"0 auto"}}>
+        <h1>📦 İade Takip</h1>
+        <p><b>Durum:</b> {status}</p>
 
-      {/* Sayaçlar */}
-      <div style={{display:"flex", gap:16, margin:"8px 0 16px 0", flexWrap:"wrap"}}>
-        <div style={card}><b>Beklenen:</b> {stats.expected}</div>
-        <div style={card}><b>Gelen:</b> {stats.received}</div>
-        <div style={card}><b>Eksik:</b> {stats.missing}</div>
-      </div>
-
-      {/* Aksiyonlar */}
-      <div style={{display:"flex", gap:8, flexWrap:"wrap", marginBottom:12}}>
-        <input type="file" accept=".xls,.xlsx" onChange={e=>handleExcel(e.target.files)} />
-        <button onClick={exportMissing}>❌ Eksikleri Excel</button>
-        <button onClick={exportReceived}>📥 Gelenleri Excel</button>
-        <button onClick={refreshData}>Yenile</button>
-        <button onClick={clearAll}>🧹 Hepsini Temizle</button>
-      </div>
-
-      {/* Kamera */}
-      <div style={panel}>
-        <h3>📷 Barkod Okut</h3>
-        <div style={{display:"flex", gap:8, alignItems:"center", marginBottom:8}}>
-          <button onClick={startScan}>Başlat</button>
-          <button onClick={stopScan} disabled={!scanning}>Durdur</button>
-          <span>Son: <code>{lastCode}</code></span>
+        {/* Sayaçlar */}
+        <div style={{display:"flex", gap:16, margin:"8px 0 16px 0", flexWrap:"wrap"}}>
+          <div style={card}><b>Beklenen:</b> {stats.expected}</div>
+          <div style={card}><b>Gelen:</b> {stats.received}</div>
+          <div style={card}><b>Eksik:</b> {stats.missing}</div>
         </div>
-        {/* Quagga video/canvas bu DIV içine gelecek */}
-        <div id="preview" ref={scannerRef} style={{width:"100%",height:320,background:"#000",borderRadius:8}} />
-      </div>
 
-      {/* Eksik İadeler */}
-      <div style={panel}>
-        <h3>❌ Eksik İadeler</h3>
-        <div style={{overflow:"auto"}}>
-          <table style={{width:"100%", borderCollapse:"collapse"}}>
-            <thead>
-              <tr>
-                <th style={th}>Barkod</th>
-                <th style={th}>İsim</th>
-                <th style={th}>Tel</th>
-                <th style={th}>Kaç Gün</th>
-                <th style={th}>İlk Yükleme</th>
-                <th style={th}>Okunduğu Tarih</th>
-                <th style={th}>Sil</th>
-              </tr>
-            </thead>
-            <tbody>
-              {missingList.map(m=>{
-                const rec = received.find(r => normalize(r.barcode) === normalize(m.barcode));
-                return (
-                  <tr key={m.barcode}>
-                    <td style={td}><code>{m.barcode}</code></td>
-                    <td style={td}>{m.isim}</td>
-                    <td style={td}><code>{m.telefon}</code></td>
-                    <td style={{...td, textAlign:"right"}}>{m.days_pending}</td>
-                    <td style={{...td, textAlign:"right"}}>{humanDate(m.added_at)}</td>
-                    <td style={{...td, textAlign:"right"}}>{humanDate(rec?.added_at)}</td>
-                    <td style={td}><button onClick={()=>deleteExpected(m.barcode)}>Sil</button></td>
-                  </tr>
-                );
-              })}
-              {missingList.length===0 && (
-                <tr><td colSpan={7} style={{padding:12, color:"#64748b"}}>Eksik iade yok 🎉</td></tr>
-              )}
-            </tbody>
-          </table>
+        {/* Aksiyonlar */}
+        <div style={{display:"flex", gap:8, flexWrap:"wrap", marginBottom:12}}>
+          <input type="file" accept=".xls,.xlsx" onChange={e=>handleExcel(e.target.files)} />
+          <button onClick={exportMissing}>❌ Eksikleri Excel</button>
+          <button onClick={exportReceived}>📥 Gelenleri Excel</button>
+          <button onClick={refreshData}>Yenile</button>
+          <button onClick={clearAll}>🧹 Hepsini Temizle</button>
         </div>
-      </div>
 
-      {/* Gelen İadeler */}
-      <div style={panel}>
-        <h3>📥 Gelen İadeler</h3>
-        <div style={{overflow:"auto"}}>
-          <table style={{width:"100%", borderCollapse:"collapse"}}>
-            <thead>
-              <tr>
-                <th style={th}>Barkod</th>
-                <th style={th}>Okunduğu Tarih</th>
-                <th style={th}>Sil</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(received||[])
-                .slice()
-                .sort((a,b)=> new Date(b.added_at||0) - new Date(a.added_at||0))
-                .map(r=>(
-                <tr key={r.barcode}>
-                  <td style={td}><code>{r.barcode}</code></td>
-                  <td style={{...td, textAlign:"right"}}>{humanDate(r.added_at)}</td>
-                  <td style={td}><button onClick={()=>deleteReceived(r.barcode)}>Sil</button></td>
+        {/* Kamera */}
+        <div style={panel}>
+          <h3>📷 Barkod Okut</h3>
+          <div style={{display:"flex", gap:8, alignItems:"center", marginBottom:8}}>
+            <button onClick={startScan}>Başlat</button>
+            <button onClick={stopScan} disabled={!scanning}>Durdur</button>
+            <span>Son: <code>{lastCode}</code></span>
+          </div>
+          <div id="preview" ref={scannerRef} style={{width:"100%",height:320,background:"#000",borderRadius:8}} />
+        </div>
+
+        {/* Eksik İadeler */}
+        <div style={panel}>
+          <h3>❌ Eksik İadeler</h3>
+          <div style={{overflow:"auto"}}>
+            <table style={{width:"100%", borderCollapse:"collapse"}}>
+              <thead>
+                <tr>
+                  <th style={th}>Barkod</th>
+                  <th style={th}>İsim</th>
+                  <th style={th}>Tel</th>
+                  <th style={th}>Kaç Gün</th>
+                  <th style={th}>İlk Yükleme</th>
+                  <th style={th}>Okunduğu Tarih</th>
+                  <th style={th}>Sil</th>
                 </tr>
-              ))}
-              {(received||[]).length===0 && (
-                <tr><td colSpan={3} style={{padding:12, color:"#64748b"}}>Henüz gelen iade yok</td></tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {missingList.map(m=>{
+                  const rec = received.find(r => normalize(r.barcode) === normalize(m.barcode));
+                  return (
+                    <tr key={m.barcode}>
+                      <td style={td}><code>{m.barcode}</code></td>
+                      <td style={td}>{m.isim}</td>
+                      <td style={td}><code>{m.telefon}</code></td>
+                      <td style={{...td, textAlign:"right"}}>{m.days_pending}</td>
+                      <td style={{...td, textAlign:"right"}}>{humanDate(m.added_at)}</td>
+                      <td style={{...td, textAlign:"right"}}>{humanDate(rec?.added_at)}</td>
+                      <td style={td}><button onClick={()=>deleteExpected(m.barcode)}>Sil</button></td>
+                    </tr>
+                  );
+                })}
+                {missingList.length===0 && (
+                  <tr><td colSpan={7} style={{padding:12, color:"#64748b"}}>Eksik iade yok 🎉</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Gelen İadeler */}
+        <div style={panel}>
+          <h3>📥 Gelen İadeler</h3>
+          <div style={{overflow:"auto"}}>
+            <table style={{width:"100%", borderCollapse:"collapse"}}>
+              <thead>
+                <tr>
+                  <th style={th}>Barkod</th>
+                  <th style={th}>Okunduğu Tarih</th>
+                  <th style={th}>Sil</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(received||[])
+                  .slice()
+                  .sort((a,b)=> new Date(b.added_at||0) - new Date(a.added_at||0))
+                  .map(r=>(
+                  <tr key={r.barcode}>
+                    <td style={td}><code>{r.barcode}</code></td>
+                    <td style={{...td, textAlign:"right"}}>{humanDate(r.added_at)}</td>
+                    <td style={td}><button onClick={()=>deleteReceived(r.barcode)}>Sil</button></td>
+                  </tr>
+                ))}
+                {(received||[]).length===0 && (
+                  <tr><td colSpan={3} style={{padding:12, color:"#64748b"}}>Henüz gelen iade yok</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -305,15 +308,11 @@ function PageInner(){
 const panel = { border:"1px solid #e5e7eb", borderRadius:12, padding:12, marginTop:12 };
 const th = { borderBottom:"1px solid #e5e7eb", textAlign:"left", padding:8 };
 const td = { borderBottom:"1px solid #f1f5f9", padding:8 };
+const card = { border:"1px solid #e5e7eb", borderRadius:8, padding:"6px 10px" };
 
 // Normalize: sadece rakam + baştaki sıfırları at
-function normalize(s){
-  return String(s||"").normalize("NFKC").replace(/\D+/g,"").replace(/^0+/,"");
-}
-function humanDate(iso){
-  if(!iso) return "";
-  try{ return new Date(iso).toLocaleString(); }catch{ return iso; }
-}
+function normalize(s){ return String(s||"").normalize("NFKC").replace(/\D+/g,"").replace(/^0+/,""); }
+function humanDate(iso){ if(!iso) return ""; try{ return new Date(iso).toLocaleString(); }catch{ return iso; } }
 
-// Bu sayfayı SSR kapalı şekilde dışa aktar (build hatalarını önler)
+// Bu sayfayı SSR kapalı yayınla
 export default dynamic(() => Promise.resolve(PageInner), { ssr: false });
