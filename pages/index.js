@@ -54,43 +54,73 @@ export default function Home(){
       const ws = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(ws, { defval:"" });
       for(const raw of rows){
-        const barcode = normalize(raw["BARKOD_NO"] || raw["BARKOD"] || "");
+        const barcode = normalize(raw["BARKOD_NO"] || raw["BARKOD"] || raw["BARCODE"] || "");
         if(!barcode) continue;
         upserts.push({
           barcode,
-          isim: raw["ALICI_ISIM"] || "",
-          telefon: raw["ALICI_TELEFON"] || "",
+          isim: (raw["ALICI_ISIM"] || raw["ISIM"] || "").toString().trim(),
+          telefon: (raw["ALICI_TELEFON"] || raw["TELEFON"] || "").toString().trim(),
           added_at: new Date().toISOString()
         });
       }
     }
     const { error } = await supabaseRef.current.from("expected").upsert(upserts, { onConflict: "barcode" });
-    if(error){ alert("Hata: " + error.message); return; }
+    if(error){ alert("Hata: " + error.message); setStatus("Hata"); return; }
     await refreshData();
   }
 
-  // Eksikleri hesapla
-  function computeMissing(){
+  // Eksikleri hesapla (normalize'lı karşılaştırma)
+  const missingList = useMemo(()=>{
     const recSet = new Set(received.map(r=> normalize(r.barcode)));
-    return expected.filter(e => !recSet.has(normalize(e.barcode)));
-  }
+    return (expected || [])
+      .filter(e => !recSet.has(normalize(e.barcode)))
+      .map(m=>{
+        const days = m.added_at ? Math.floor((Date.now() - new Date(m.added_at).getTime()) / (24*3600*1000)) : "";
+        return { ...m, days_pending: days };
+      })
+      .sort((a,b)=> (b.days_pending||0) - (a.days_pending||0));
+  }, [expected, received]);
+
+  // Sayaçlar
+  const stats = useMemo(()=>({
+    expected: expected.length,
+    received: received.length,
+    missing: missingList.length
+  }), [expected, received, missingList]);
 
   // Excel dışa aktar
   function exportMissing(){
-    const rows = computeMissing();
+    const rows = missingList.map(m => {
+      const rec = received.find(r => normalize(r.barcode) === normalize(m.barcode));
+      return {
+        BARKOD_NO: m.barcode,
+        ALICI_ISIM: m.isim || "",
+        ALICI_TELEFON: m.telefon || "",
+        KAC_GUNDUR_GELMEDI: m.days_pending,
+        ILK_YUKLEME_TARIHI: humanDate(m.added_at),
+        OKUNDUGU_TARIH: humanDate(rec?.added_at)
+      };
+    });
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Eksik");
-    XLSX.writeFile(wb, "Eksik.xlsx");
+    XLSX.utils.book_append_sheet(wb, ws, "EksikIadeler");
+    XLSX.writeFile(wb, `Eksik_Iadeler_${new Date().toISOString().slice(0,10)}.xlsx`);
   }
   function exportReceived(){
-    const ws = XLSX.utils.json_to_sheet(received);
+    const rows = (received || [])
+      .slice()
+      .sort((a,b)=> new Date(b.added_at||0) - new Date(a.added_at||0))
+      .map(r => ({
+        BARKOD_NO: r.barcode,
+        OKUNDUGU_TARIH: humanDate(r.added_at)
+      }));
+    const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Gelen");
-    XLSX.writeFile(wb, "Gelen.xlsx");
+    XLSX.utils.book_append_sheet(wb, ws, "GelenIadeler");
+    XLSX.writeFile(wb, `Gelen_Iadeler_${new Date().toISOString().slice(0,10)}.xlsx`);
   }
 
-  // Satır silme
+  // Satır sil
   async function deleteExpected(barcode){
     await supabaseRef.current.from("expected").delete().eq("barcode", barcode);
     await refreshData();
@@ -102,23 +132,26 @@ export default function Home(){
 
   // Hepsini temizle
   async function clearAll(){
+    if(!confirm("Beklenen ve Gelen tablolardaki TÜM kayıtlar silinecek. Emin misin?")) return;
     await supabaseRef.current.from("expected").delete().neq("barcode", "");
     await supabaseRef.current.from("received").delete().neq("barcode", "");
     await refreshData();
   }
 
-  // Kamera okuma
+  // Kamera
   async function startScan(){
     if(!clientReady) return;
     if(typeof window === "undefined" || !window.Quagga) return;
     if(scanning) return;
     window.Quagga.init({
       inputStream: { type:"LiveStream", target: scannerRef.current, constraints:{ facingMode:"environment" } },
-      decoder: { readers:["code_128_reader","ean_reader","ean_8_reader"] }
+      decoder: { readers:["code_128_reader","ean_reader","ean_8_reader","upc_reader","upc_e_reader"] },
+      locate: true
     }, (err)=>{
       if(err){ setStatus("Kamera hatası"); return; }
       window.Quagga.start(); setScanning(true); setStatus("Tarama açık");
     });
+    window.Quagga.offDetected();
     window.Quagga.onDetected(async res=>{
       const raw = res?.codeResult?.code || "";
       if(!raw) return;
@@ -126,65 +159,139 @@ export default function Home(){
       playBeep();
     });
   }
-  function stopScan(){ try { window.Quagga.stop(); } catch{}; setScanning(false); }
+  function stopScan(){ try { window.Quagga.stop(); } catch{}; setScanning(false); setStatus("Durduruldu"); }
   async function onScan(raw){
     const code = normalize(raw); if(!code) return;
     setLastCode(code);
-    await supabaseRef.current.from("received").upsert({ barcode: code, added_at:new Date().toISOString() }, { onConflict:"barcode" });
+    const { error } = await supabaseRef.current
+      .from("received")
+      .upsert({ barcode: code, added_at:new Date().toISOString() }, { onConflict:"barcode" });
+    if(error){ setStatus("Hata: " + error.message); return; }
     await refreshData();
+    if(navigator.vibrate) navigator.vibrate(30);
   }
   function playBeep(){
-    const ctx = new (window.AudioContext||window.webkitAudioContext)();
-    const osc = ctx.createOscillator(); osc.type="sine"; osc.frequency.setValueAtTime(800, ctx.currentTime);
-    osc.connect(ctx.destination); osc.start(); osc.stop(ctx.currentTime+0.1);
+    try{
+      const ctx = new (window.AudioContext||window.webkitAudioContext)();
+      const osc = ctx.createOscillator(); osc.type="sine"; osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.connect(ctx.destination); osc.start(); osc.stop(ctx.currentTime+0.12);
+    }catch{}
   }
 
   return (
     <>
       <Head><title>İade Takip</title></Head>
       <Script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js" strategy="afterInteractive" />
-      <div style={{padding:16,fontFamily:"system-ui"}}>
+      <div style={{padding:16,fontFamily:"system-ui",maxWidth:1100,margin:"0 auto"}}>
         <h1>📦 İade Takip</h1>
         <p><b>Durum:</b> {status}</p>
-        <input type="file" accept=".xls,.xlsx" onChange={e=>handleExcel(e.target.files)} />
-        <button onClick={exportMissing}>Eksikleri Excel</button>
-        <button onClick={exportReceived}>Gelenleri Excel</button>
-        <button onClick={clearAll}>🧹 Hepsini Temizle</button>
 
-        <h3>📷 Barkod Okut</h3>
-        <button onClick={startScan}>Başlat</button>
-        <button onClick={stopScan}>Durdur</button>
-        <div ref={scannerRef} style={{width:"100%",height:300,background:"#000"}} />
-        <p>Son: {lastCode}</p>
+        {/* Sayaçlar */}
+        <div style={{display:"flex", gap:16, margin:"8px 0 16px 0", flexWrap:"wrap"}}>
+          <div style={card}><b>Beklenen:</b> {stats.expected}</div>
+          <div style={card}><b>Gelen:</b> {stats.received}</div>
+          <div style={card}><b>Eksik:</b> {stats.missing}</div>
+        </div>
 
-        <h3>❌ Eksik İadeler</h3>
-        <table border="1" cellPadding="4">
-          <thead><tr><th>Barkod</th><th>İsim</th><th>Tel</th><th>Sil</th></tr></thead>
-          <tbody>
-            {computeMissing().map(m=>(
-              <tr key={m.barcode}>
-                <td>{m.barcode}</td><td>{m.isim}</td><td>{m.telefon}</td>
-                <td><button onClick={()=>deleteExpected(m.barcode)}>Sil</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {/* Aksiyonlar */}
+        <div style={{display:"flex", gap:8, flexWrap:"wrap", marginBottom:12}}>
+          <input type="file" accept=".xls,.xlsx" onChange={e=>handleExcel(e.target.files)} />
+          <button onClick={exportMissing}>❌ Eksikleri Excel</button>
+          <button onClick={exportReceived}>📥 Gelenleri Excel</button>
+          <button onClick={refreshData}>Yenile</button>
+          <button onClick={clearAll}>🧹 Hepsini Temizle</button>
+        </div>
 
-        <h3>📥 Gelen İadeler</h3>
-        <table border="1" cellPadding="4">
-          <thead><tr><th>Barkod</th><th>Tarih</th><th>Sil</th></tr></thead>
-          <tbody>
-            {received.map(r=>(
-              <tr key={r.barcode}>
-                <td>{r.barcode}</td><td>{r.added_at}</td>
-                <td><button onClick={()=>deleteReceived(r.barcode)}>Sil</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {/* Kamera */}
+        <div style={panel}>
+          <h3>📷 Barkod Okut</h3>
+          <div style={{display:"flex", gap:8, alignItems:"center", marginBottom:8}}>
+            <button onClick={startScan}>Başlat</button>
+            <button onClick={stopScan} disabled={!scanning}>Durdur</button>
+            <span>Son: <code>{lastCode}</code></span>
+          </div>
+          <div ref={scannerRef} style={{width:"100%",height:320,background:"#000",borderRadius:8}} />
+        </div>
+
+        {/* Eksik İadeler */}
+        <div style={panel}>
+          <h3>❌ Eksik İadeler</h3>
+          <div style={{overflow:"auto"}}>
+            <table style={{width:"100%", borderCollapse:"collapse"}}>
+              <thead>
+                <tr>
+                  <th style={th}>Barkod</th>
+                  <th style={th}>İsim</th>
+                  <th style={th}>Tel</th>
+                  <th style={th}>Kaç Gün</th>
+                  <th style={th}>İlk Yükleme</th>
+                  <th style={th}>Okunduğu Tarih</th>
+                  <th style={th}>Sil</th>
+                </tr>
+              </thead>
+              <tbody>
+                {missingList.map(m=>{
+                  const rec = received.find(r => normalize(r.barcode) === normalize(m.barcode));
+                  return (
+                    <tr key={m.barcode}>
+                      <td style={td}><code>{m.barcode}</code></td>
+                      <td style={td}>{m.isim}</td>
+                      <td style={td}><code>{m.telefon}</code></td>
+                      <td style={{...td, textAlign:"right"}}>{m.days_pending}</td>
+                      <td style={{...td, textAlign:"right"}}>{humanDate(m.added_at)}</td>
+                      <td style={{...td, textAlign:"right"}}>{humanDate(rec?.added_at)}</td>
+                      <td style={td}><button onClick={()=>deleteExpected(m.barcode)}>Sil</button></td>
+                    </tr>
+                  );
+                })}
+                {missingList.length===0 && (
+                  <tr><td colSpan={7} style={{padding:12, color:"#64748b"}}>Eksik iade yok 🎉</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Gelen İadeler */}
+        <div style={panel}>
+          <h3>📥 Gelen İadeler</h3>
+          <div style={{overflow:"auto"}}>
+            <table style={{width:"100%", borderCollapse:"collapse"}}>
+              <thead>
+                <tr>
+                  <th style={th}>Barkod</th>
+                  <th style={th}>Okunduğu Tarih</th>
+                  <th style={th}>Sil</th>
+                </tr>
+              </thead>
+              <tbody>
+                {received
+                  .slice()
+                  .sort((a,b)=> new Date(b.added_at||0) - new Date(a.added_at||0))
+                  .map(r=>(
+                  <tr key={r.barcode}>
+                    <td style={td}><code>{r.barcode}</code></td>
+                    <td style={{...td, textAlign:"right"}}>{humanDate(r.added_at)}</td>
+                    <td style={td}><button onClick={()=>deleteReceived(r.barcode)}>Sil</button></td>
+                  </tr>
+                ))}
+                {received.length===0 && (
+                  <tr><td colSpan={3} style={{padding:12, color:"#64748b"}}>Henüz gelen iade yok</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
       </div>
     </>
   );
 }
 
-function normalize(s){ return String(s||"").replace(/\D+/g,"").replace(/^0+/,""); }
+const panel = { border:"1px solid #e5e7eb", borderRadius:12, padding:12, marginTop:12 };
+const th = { borderBottom:"1px solid #e5e7eb", textAlign:"left", padding:8 };
+const td = { borderBottom:"1px solid #f1f5f9", padding:8 };
+
+// rakam dışı temizle + baştaki sıfırları at
+function normalize(s){ return String(s||"").normalize("NFKC").replace(/\D+/g,"").replace(/^0+/,""); }
+function humanDate(iso){ if(!iso) return ""; try { return new Date(iso).toLocaleString(); } catch { return iso; } }
