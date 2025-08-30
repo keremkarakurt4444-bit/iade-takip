@@ -32,7 +32,6 @@ function PageInner(){
       }
     })();
     return ()=>{ try{ window?.Quagga?.stop(); }catch{} };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function refreshData(){
@@ -45,7 +44,7 @@ function PageInner(){
     setStatus("Hazır");
   }
 
-  // --- Excel içe aktar (dinamik xlsx)
+  // Excel/CSV içe aktar
   async function handleExcel(fileList){
     if(!supabaseRef.current){ alert("Supabase ayarları eksik"); return; }
     if(!fileList || fileList.length===0){ alert("Excel seçin"); return; }
@@ -60,29 +59,58 @@ function PageInner(){
       return;
     }
 
+    const normKey = (k)=> String(k||"")
+      .normalize("NFKD")
+      .replace(/\s+/g, "_")
+      .replace(/[^\w]/g, "")
+      .toUpperCase();
+
+    const pickField = (row, names)=>{
+      for(const n of names){
+        if(row[n] !== undefined && String(row[n]).trim() !== "") return String(row[n]).trim();
+      }
+      return "";
+    };
+
     const upserts = [];
     for(const f of fileList){
       const buf = await f.arrayBuffer();
-      const wb = XLSX.read(buf, { type:"array" });
+      const wb = /\.csv$/i.test(f.name||"")
+        ? XLSX.read(new TextDecoder("utf-8").decode(buf), { type:"string" })
+        : XLSX.read(buf, { type:"array" });
       const ws = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, { defval:"" });
-      for(const raw of rows){
-        const barcode = normalize(raw["BARKOD_NO"] || raw["BARKOD"] || raw["BARCODE"] || raw["MUS_BARKOD_NO"] || "");
+      const rawRows = XLSX.utils.sheet_to_json(ws, { defval:"", raw: false });
+
+      const rows = rawRows.map(obj=>{
+        const n = {};
+        for(const [k,v] of Object.entries(obj)) n[normKey(k)] = v;
+        return n;
+      });
+
+      for (const r of rows){
+        const barcodeRaw = r["BARKOD"] || r["BARKODNO"] || r["MUSBARKODNO"] || r["BARCODE"] || r["MUSTERI_BARKOD"] || "";
+        const barcode = normalize(barcodeRaw);
         if(!barcode) continue;
-        upserts.push({
-          barcode,
-          isim: (raw["ALICI_ISIM"] || raw["ISIM"] || "").toString().trim(),
-          telefon: (raw["ALICI_TELEFON"] || raw["TELEFON"] || "").toString().trim(),
-          added_at: new Date().toISOString()
-        });
+
+        const isim = pickField(r, ["ALICIISIM","ISIM","MUSTERIADI","ADSOYAD"]);
+        const telefon = pickField(r, ["ALICITELEFON","TELEFON","GSM","CEP"]);
+
+        upserts.push({ barcode, isim, telefon, added_at: new Date().toISOString() });
       }
     }
+
+    if(upserts.length===0){
+      setStatus("Excel okundu ama uygun satır bulunamadı");
+      return;
+    }
+
     const { error } = await supabaseRef.current.from("expected").upsert(upserts, { onConflict: "barcode" });
     if(error){ alert("Hata: " + error.message); setStatus("Hata"); return; }
+
     await refreshData();
+    setStatus(`Hazır (Excel’den ${upserts.length} satır işlendi)`);
   }
 
-  // --- Eksikleri hesapla
   const missingList = useMemo(()=>{
     const recSet = new Set((received||[]).map(r=> normalize(r.barcode)));
     return (expected||[])
@@ -90,18 +118,15 @@ function PageInner(){
       .map(m=>{
         const days = m.added_at ? Math.floor((Date.now() - new Date(m.added_at).getTime()) / (24*3600*1000)) : "";
         return { ...m, days_pending: days };
-      })
-      .sort((a,b)=> (b.days_pending||0) - (a.days_pending||0));
+      });
   }, [expected, received]);
 
-  // --- Sayaçlar
   const stats = useMemo(()=>({
     expected: expected.length,
     received: received.length,
     missing: missingList.length
   }), [expected, received, missingList]);
 
-  // --- Excel dışa aktar (dinamik xlsx)
   async function exportMissing(){
     const XLSX = (await import("xlsx")).default;
     const rows = missingList.map(m => {
@@ -122,17 +147,13 @@ function PageInner(){
   }
   async function exportReceived(){
     const XLSX = (await import("xlsx")).default;
-    const rows = (received||[])
-      .slice()
-      .sort((a,b)=> new Date(b.added_at||0) - new Date(a.added_at||0))
-      .map(r => ({ BARKOD_NO: r.barcode, OKUNDUGU_TARIH: humanDate(r.added_at) }));
+    const rows = (received||[]).map(r => ({ BARKOD_NO: r.barcode, OKUNDUGU_TARIH: humanDate(r.added_at) }));
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "GelenIadeler");
     XLSX.writeFile(wb, `Gelen_Iadeler_${new Date().toISOString().slice(0,10)}.xlsx`);
   }
 
-  // --- Satır sil / Hepsini temizle
   async function deleteExpected(barcode){
     await supabaseRef.current.from("expected").delete().eq("barcode", barcode);
     await refreshData();
@@ -142,13 +163,12 @@ function PageInner(){
     await refreshData();
   }
   async function clearAll(){
-    if(!confirm("Beklenen ve Gelen tablolardaki TÜM kayıtlar silinecek. Emin misin?")) return;
+    if(!confirm("Tüm kayıtlar silinecek. Emin misin?")) return;
     await supabaseRef.current.from("expected").delete().neq("barcode", "");
     await supabaseRef.current.from("received").delete().neq("barcode", "");
     await refreshData();
   }
 
-  // --- Kamera
   async function startScan(){
     setStatus("Kamera hazırlanıyor...");
     const Quagga = window?.Quagga;
@@ -160,7 +180,7 @@ function PageInner(){
       decoder: { readers:["code_128_reader","ean_reader","ean_8_reader","upc_reader","upc_e_reader"] },
       locate: true
     }, (err)=>{
-      if(err){ console.error(err); setStatus("Kamera hatası / izin yok"); return; }
+      if(err){ console.error(err); setStatus("Kamera hatası"); return; }
       Quagga.start(); setScanning(true); setStatus("Tarama açık");
     });
 
@@ -180,17 +200,15 @@ function PageInner(){
   async function onScan(raw){
     const code = normalize(raw); if(!code) return;
     setLastCode(code);
-    const { error } = await supabaseRef.current
-      .from("received")
-      .upsert({ barcode: code, added_at: new Date().toISOString() }, { onConflict:"barcode" });
-    if(error){ setStatus("Hata: " + error.message); return; }
+    await supabaseRef.current.from("received").upsert({ barcode: code, added_at: new Date().toISOString() }, { onConflict:"barcode" });
     await refreshData();
     if(navigator.vibrate) navigator.vibrate(30);
   }
   function playBeep(){
     try{
       const ctx = new (window.AudioContext||window.webkitAudioContext)();
-      const osc = ctx.createOscillator(); osc.type="sine"; osc.frequency.setValueAtTime(880, ctx.currentTime);
+      const osc = ctx.createOscillator();
+      osc.type="sine"; osc.frequency.setValueAtTime(880, ctx.currentTime);
       osc.connect(ctx.destination); osc.start(); osc.stop(ctx.currentTime+0.12);
     }catch{}
   }
@@ -203,23 +221,20 @@ function PageInner(){
         <h1>📦 İade Takip</h1>
         <p><b>Durum:</b> {status}</p>
 
-        {/* Sayaçlar */}
         <div style={{display:"flex", gap:16, margin:"8px 0 16px 0", flexWrap:"wrap"}}>
           <div style={card}><b>Beklenen:</b> {stats.expected}</div>
           <div style={card}><b>Gelen:</b> {stats.received}</div>
           <div style={card}><b>Eksik:</b> {stats.missing}</div>
         </div>
 
-        {/* Aksiyonlar */}
         <div style={{display:"flex", gap:8, flexWrap:"wrap", marginBottom:12}}>
-          <input type="file" accept=".xls,.xlsx" onChange={e=>handleExcel(e.target.files)} />
+          <input type="file" accept=".xls,.xlsx,.csv" onChange={e=>handleExcel(e.target.files)} />
           <button onClick={exportMissing}>❌ Eksikleri Excel</button>
           <button onClick={exportReceived}>📥 Gelenleri Excel</button>
           <button onClick={refreshData}>Yenile</button>
           <button onClick={clearAll}>🧹 Hepsini Temizle</button>
         </div>
 
-        {/* Kamera */}
         <div style={panel}>
           <h3>📷 Barkod Okut</h3>
           <div style={{display:"flex", gap:8, alignItems:"center", marginBottom:8}}>
@@ -230,22 +245,14 @@ function PageInner(){
           <div id="preview" ref={scannerRef} style={{width:"100%",height:320,background:"#000",borderRadius:8}} />
         </div>
 
-        {/* Eksik İadeler */}
         <div style={panel}>
           <h3>❌ Eksik İadeler</h3>
           <div style={{overflow:"auto"}}>
             <table style={{width:"100%", borderCollapse:"collapse"}}>
-              <thead>
-                <tr>
-                  <th style={th}>Barkod</th>
-                  <th style={th}>İsim</th>
-                  <th style={th}>Tel</th>
-                  <th style={th}>Kaç Gün</th>
-                  <th style={th}>İlk Yükleme</th>
-                  <th style={th}>Okunduğu Tarih</th>
-                  <th style={th}>Sil</th>
-                </tr>
-              </thead>
+              <thead><tr>
+                <th style={th}>Barkod</th><th style={th}>İsim</th><th style={th}>Tel</th><th style={th}>Kaç Gün</th>
+                <th style={th}>İlk Yükleme</th><th style={th}>Okunduğu Tarih</th><th style={th}>Sil</th>
+              </tr></thead>
               <tbody>
                 {missingList.map(m=>{
                   const rec = received.find(r => normalize(r.barcode) === normalize(m.barcode));
@@ -253,48 +260,34 @@ function PageInner(){
                     <tr key={m.barcode}>
                       <td style={td}><code>{m.barcode}</code></td>
                       <td style={td}>{m.isim}</td>
-                      <td style={td}><code>{m.telefon}</code></td>
-                      <td style={{...td, textAlign:"right"}}>{m.days_pending}</td>
-                      <td style={{...td, textAlign:"right"}}>{humanDate(m.added_at)}</td>
-                      <td style={{...td, textAlign:"right"}}>{humanDate(rec?.added_at)}</td>
+                      <td style={td}>{m.telefon}</td>
+                      <td style={td}>{m.days_pending}</td>
+                      <td style={td}>{humanDate(m.added_at)}</td>
+                      <td style={td}>{humanDate(rec?.added_at)}</td>
                       <td style={td}><button onClick={()=>deleteExpected(m.barcode)}>Sil</button></td>
                     </tr>
                   );
                 })}
-                {missingList.length===0 && (
-                  <tr><td colSpan={7} style={{padding:12, color:"#64748b"}}>Eksik iade yok 🎉</td></tr>
-                )}
+                {missingList.length===0 && <tr><td colSpan={7} style={{padding:12, color:"#64748b"}}>Eksik iade yok 🎉</td></tr>}
               </tbody>
             </table>
           </div>
         </div>
 
-        {/* Gelen İadeler */}
         <div style={panel}>
           <h3>📥 Gelen İadeler</h3>
           <div style={{overflow:"auto"}}>
             <table style={{width:"100%", borderCollapse:"collapse"}}>
-              <thead>
-                <tr>
-                  <th style={th}>Barkod</th>
-                  <th style={th}>Okunduğu Tarih</th>
-                  <th style={th}>Sil</th>
-                </tr>
-              </thead>
+              <thead><tr><th style={th}>Barkod</th><th style={th}>Okunduğu Tarih</th><th style={th}>Sil</th></tr></thead>
               <tbody>
-                {(received||[])
-                  .slice()
-                  .sort((a,b)=> new Date(b.added_at||0) - new Date(a.added_at||0))
-                  .map(r=>(
+                {(received||[]).map(r=>(
                   <tr key={r.barcode}>
                     <td style={td}><code>{r.barcode}</code></td>
-                    <td style={{...td, textAlign:"right"}}>{humanDate(r.added_at)}</td>
+                    <td style={td}>{humanDate(r.added_at)}</td>
                     <td style={td}><button onClick={()=>deleteReceived(r.barcode)}>Sil</button></td>
                   </tr>
                 ))}
-                {(received||[]).length===0 && (
-                  <tr><td colSpan={3} style={{padding:12, color:"#64748b"}}>Henüz gelen iade yok</td></tr>
-                )}
+                {(received||[]).length===0 && <tr><td colSpan={3} style={{padding:12, color:"#64748b"}}>Henüz gelen yok</td></tr>}
               </tbody>
             </table>
           </div>
@@ -304,15 +297,12 @@ function PageInner(){
   );
 }
 
-// Basit stiller
 const panel = { border:"1px solid #e5e7eb", borderRadius:12, padding:12, marginTop:12 };
 const th = { borderBottom:"1px solid #e5e7eb", textAlign:"left", padding:8 };
 const td = { borderBottom:"1px solid #f1f5f9", padding:8 };
 const card = { border:"1px solid #e5e7eb", borderRadius:8, padding:"6px 10px" };
 
-// Normalize: sadece rakam + baştaki sıfırları at
 function normalize(s){ return String(s||"").normalize("NFKC").replace(/\D+/g,"").replace(/^0+/,""); }
 function humanDate(iso){ if(!iso) return ""; try{ return new Date(iso).toLocaleString(); }catch{ return iso; } }
 
-// Bu sayfayı SSR kapalı yayınla
 export default dynamic(() => Promise.resolve(PageInner), { ssr: false });
